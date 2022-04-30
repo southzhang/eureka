@@ -38,13 +38,13 @@ public class Lease<T> {
 
     public static final int DEFAULT_DURATION_IN_SECS = 90;
 
-    private T holder;
-    private long evictionTimestamp;
-    private long registrationTimestamp;
-    private long serviceUpTimestamp;
+    private T holder;//服务实例数据
+    private long evictionTimestamp;//服务剔除时间
+    private long registrationTimestamp;//注册时间
+    private long serviceUpTimestamp;//服务上线时间
     // Make it volatile so that the expiration task would see this quicker
-    private volatile long lastUpdateTimestamp;
-    private long duration;
+    private volatile long lastUpdateTimestamp;//上次更新时间
+    private long duration;//信息有效时长
 
     public Lease(T r, int durationInSecs) {
         holder = r;
@@ -108,6 +108,11 @@ public class Lease<T> {
      * @param additionalLeaseMs any additional lease time to add to the lease evaluation in ms.
      */
     public boolean isExpired(long additionalLeaseMs) {
+        // evictionTimestamp：实例下架时间，当客户端下架时记录
+        // lastUpdateTimestamp：续租到期时间，当客户端注册或心跳续租时记录
+        // duration：续租时间，如果客户端注册时未指定，默认90s
+        // additionalLeaseMs：补偿时间
+        // 如果 实例下架时间大于0 或 （当前时间 大于 续租到期时间 + 续租时间 + 补偿时间），则表示已过期
         return (evictionTimestamp > 0 || System.currentTimeMillis() > (lastUpdateTimestamp + duration + additionalLeaseMs));
     }
 

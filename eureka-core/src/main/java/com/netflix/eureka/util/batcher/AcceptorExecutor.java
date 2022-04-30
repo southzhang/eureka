@@ -1,19 +1,5 @@
 package com.netflix.eureka.util.batcher;
 
-import java.util.ArrayList;
-import java.util.Deque;
-import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.BlockingDeque;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingDeque;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-
 import com.netflix.eureka.util.batcher.TaskProcessor.ProcessingResult;
 import com.netflix.servo.annotations.DataSourceType;
 import com.netflix.servo.annotations.Monitor;
@@ -24,6 +10,10 @@ import com.netflix.servo.monitor.Timer;
 import com.netflix.servo.stats.StatsConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.netflix.eureka.Names.METRIC_REPLICATION_PREFIX;
 
@@ -183,16 +173,21 @@ class AcceptorExecutor<ID, T> {
             long scheduleTime = 0;
             while (!isShutdown.get()) {
                 try {
+                    // 排出输入队列的任务：将 reprocessQueue、acceptorQueue 队列的任务转移到 pendingTasks
                     drainInputQueues();
 
+                    // 待处理的数量
                     int totalItems = processingOrder.size();
 
                     long now = System.currentTimeMillis();
                     if (scheduleTime < now) {
+                        // 时间补偿，正常情况下 transmissionDelay() 返回 0
                         scheduleTime = now + trafficShaper.transmissionDelay();
                     }
                     if (scheduleTime <= now) {
+                        // 分配批量工作任务：将 pendingTasks 的任务分一批到（最多250个） batchWorkQueue 队列中
                         assignBatchWork();
+                        // 分配单项工作任务：pendingTasks 如果还有剩余任务，将没有过期的转移到 singleItemWorkQueue 队列中
                         assignSingleItemWork();
                     }
 
@@ -211,28 +206,37 @@ class AcceptorExecutor<ID, T> {
         }
 
         private boolean isFull() {
+            // 待处理的任务 >= 10000，也就是说 pendingTasks 最多放 10000 个任务
             return pendingTasks.size() >= maxBufferSize;
         }
 
         private void drainInputQueues() throws InterruptedException {
             do {
+                // 排出 reprocessQueue，将 reprocessQueue 队列的任务转移到 pendingTasks
                 drainReprocessQueue();
+                // 排出 acceptorQueue，将 acceptorQueue 队列的任务转移到 pendingTasks
                 drainAcceptorQueue();
 
                 if (!isShutdown.get()) {
                     // If all queues are empty, block for a while on the acceptor queue
                     if (reprocessQueue.isEmpty() && acceptorQueue.isEmpty() && pendingTasks.isEmpty()) {
+                        // 等待任务放入 acceptorQueue，等待 10 毫秒
                         TaskHolder<ID, T> taskHolder = acceptorQueue.poll(10, TimeUnit.MILLISECONDS);
                         if (taskHolder != null) {
+                            // 放入之后 acceptorQueue、pendingTasks 就不为空了
                             appendTaskHolder(taskHolder);
                         }
                     }
                 }
+                // pendingTasks 为空、acceptorQueue 不为空、reprocessQueue不为空时，就会一直循环
+                // 如果所有任务都处理完了，reprocessQueue、acceptorQueue、pendingTasks 都是空的，
+                // 这时就会循环等待任务进入 acceptorQueue，每次等待 10 毫秒
             } while (!reprocessQueue.isEmpty() || !acceptorQueue.isEmpty() || pendingTasks.isEmpty());
         }
 
         private void drainAcceptorQueue() {
             while (!acceptorQueue.isEmpty()) {
+                // 将 acceptorQueue 的任务转移到 pendingTasks
                 appendTaskHolder(acceptorQueue.poll());
             }
         }
@@ -240,32 +244,42 @@ class AcceptorExecutor<ID, T> {
         private void drainReprocessQueue() {
             long now = System.currentTimeMillis();
             while (!reprocessQueue.isEmpty() && !isFull()) {
+                // 从 reprocessQueue 队尾取出任务
                 TaskHolder<ID, T> taskHolder = reprocessQueue.pollLast();
                 ID id = taskHolder.getId();
                 if (taskHolder.getExpiryTime() <= now) {
+                    // 任务过期
                     expiredTasks++;
                 } else if (pendingTasks.containsKey(id)) {
+                    // pendingTasks 已存在
                     overriddenTasks++;
                 } else {
+                    // 将 reprocessQueue 队列的任务放到 pendingTasks
                     pendingTasks.put(id, taskHolder);
+                    // 添加到 processingOrder 队列的头部，reprocessQueue 是失败重试的队列，所以优先级高一些
                     processingOrder.addFirst(id);
                 }
             }
             if (isFull()) {
                 queueOverflows += reprocessQueue.size();
+                // pendingTasks 满了，就清空 reprocessQueue
                 reprocessQueue.clear();
             }
         }
 
         private void appendTaskHolder(TaskHolder<ID, T> taskHolder) {
             if (isFull()) {
+                // pendingTasks 满了就移除一个元素
                 pendingTasks.remove(processingOrder.poll());
                 queueOverflows++;
             }
+            // 将 acceptorQueue 里的任务放到 pendingTasks
             TaskHolder<ID, T> previousTask = pendingTasks.put(taskHolder.getId(), taskHolder);
             if (previousTask == null) {
+                // 原本不存在，将任务ID添加到 processingOrder 队列的最后
                 processingOrder.add(taskHolder.getId());
             } else {
+                // 已经存在了，就是覆盖
                 overriddenTasks++;
             }
         }
@@ -278,6 +292,7 @@ class AcceptorExecutor<ID, T> {
                         ID id = processingOrder.poll();
                         TaskHolder<ID, T> holder = pendingTasks.remove(id);
                         if (holder.getExpiryTime() > now) {
+                            // 将 pendingTasks 的任务移到 singleItemWorkQueue
                             singleItemWorkQueue.add(holder);
                             return;
                         }
@@ -289,11 +304,15 @@ class AcceptorExecutor<ID, T> {
         }
 
         void assignBatchWork() {
+            // 有足够的任务做一个批处理
             if (hasEnoughTasksForNextBatch()) {
                 if (batchWorkRequests.tryAcquire(1)) {
                     long now = System.currentTimeMillis();
+                    // 一批任务最多 250 个
                     int len = Math.min(maxBatchingSize, processingOrder.size());
                     List<TaskHolder<ID, T>> holders = new ArrayList<>(len);
+                    // 将 pendingTasks 中的任务移动一批到 holders 中
+                    // 也就是说，如果队列中有500个任务，这一批任务最多也是250个
                     while (holders.size() < len && !processingOrder.isEmpty()) {
                         ID id = processingOrder.poll();
                         TaskHolder<ID, T> holder = pendingTasks.remove(id);
@@ -307,12 +326,14 @@ class AcceptorExecutor<ID, T> {
                         batchWorkRequests.release();
                     } else {
                         batchSizeMetric.record(holders.size(), TimeUnit.MILLISECONDS);
+                        // 添加到批量队列中
                         batchWorkQueue.add(holders);
                     }
                 }
             }
         }
 
+        // 是否有足够的任务做一个批处理
         private boolean hasEnoughTasksForNextBatch() {
             if (processingOrder.isEmpty()) {
                 return false;
@@ -320,8 +341,9 @@ class AcceptorExecutor<ID, T> {
             if (pendingTasks.size() >= maxBufferSize) {
                 return true;
             }
-
+            // 从 processingOrder 队首取一个任务ID，然后从 pendingTasks 读取这个任务。注意 peek() 只是取出元素，并不会移除队首的元素
             TaskHolder<ID, T> nextHolder = pendingTasks.get(processingOrder.peek());
+            // 判断任务提交到现在的时间差是否超过最大批任务延迟时间（500毫秒）
             long delay = System.currentTimeMillis() - nextHolder.getSubmitTimestamp();
             return delay >= maxBatchingDelay;
         }

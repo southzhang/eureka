@@ -95,7 +95,9 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
     private static final String US_EAST_1 = "us-east-1";
     private static final int PRIME_PEER_NODES_RETRY_MS = 30000;
 
+    // 当前服务端节点的启动时间
     private long startupTime = 0;
+    // 判断服务端启动时同步集群节点注册表的实例数是否为空
     private boolean peerInstancesTransferEmptyOnStartup = true;
 
     public enum Action {
@@ -114,6 +116,7 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
         }
     };
 
+    // 最近一分钟同步复制给集群节点的次数
     private final MeasuredRate numberOfReplicationsLastMin;
 
     protected final EurekaClient eurekaClient;
@@ -136,6 +139,7 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
         this.numberOfReplicationsLastMin = new MeasuredRate(1000 * 60 * 1);
         // We first check if the instance is STARTING or DOWN, then we check explicit overrides,
         // then we check the status of a potentially existing lease.
+        // 执行构造方法初始化时，添加了3个规则
         this.instanceStatusOverrideRule = new FirstMatchWinsCompositeRule(new DownOrStartingRule(),
                 new OverrideExistsRule(overriddenInstanceStatusMap), new LeaseExistsRule());
     }
@@ -207,16 +211,23 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
         // Copy entire entry from neighboring DS node
         int count = 0;
 
+        // 循环，最多重试RegistrySyncRetries次（默认 5）
+        // eurekaClient中的逻辑会重试其它的eureka节点
         for (int i = 0; ((i < serverConfig.getRegistrySyncRetries()) && (count == 0)); i++) {
             if (i > 0) {
                 try {
+                    // 如果第一次没有在自己的本地 eureka client 中获取到注册表
+                    // 说明自己本地的 eureka client 还没有从任何其他的 eureka server 中获取到注册表
+                    // 所以此时重试，等待 30s
                     Thread.sleep(serverConfig.getRegistrySyncRetryWaitMs());
                 } catch (InterruptedException e) {
                     logger.warn("Interrupted during registry transfer..");
                     break;
                 }
             }
+            // 从eurekaClient获取服务列表
             Applications apps = eurekaClient.getApplications();
+            // 循环服务列表，并依次注册
             for (Application app : apps.getRegisteredApplications()) {
                 for (InstanceInfo instance : app.getInstances()) {
                     try {
@@ -236,13 +247,18 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
     @Override
     public void openForTraffic(ApplicationInfoManager applicationInfoManager, int count) {
         // Renewals happen every 30 seconds and for a minute it should be a factor of 2.
+        // 每分钟期待的续约数（默认30s续约，60s就是2次）
         this.expectedNumberOfRenewsPerMin = count * 2;
+        // 每分钟续约的阀值：85% * expectedNumberOfRenewsPerMin
         this.numberOfRenewsPerMinThreshold =
                 (int) (this.expectedNumberOfRenewsPerMin * serverConfig.getRenewalPercentThreshold());
         logger.info("Got " + count + " instances from neighboring DS node");
         logger.info("Renew threshold is: " + numberOfRenewsPerMinThreshold);
+        // 记录服务端启动时间
         this.startupTime = System.currentTimeMillis();
         if (count > 0) {
+            //可count默认值是1，那么peerInstancesTransferEmptyOnStartup始终不会是true
+            //在PeerAwareInstanceRegistryImpl#shouldAllowAccess(boolean)方法有用
             this.peerInstancesTransferEmptyOnStartup = false;
         }
         DataCenterInfo.Name selfName = applicationInfoManager.getInfo().getDataCenterInfo().getName();
@@ -252,7 +268,9 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
             primeAwsReplicas(applicationInfoManager);
         }
         logger.info("Changing status to UP");
+        // 设置服务端实例状态为 UP
         applicationInfoManager.setInstanceStatus(InstanceStatus.UP);
+        // 开启新的【EvictionTask】
         super.postInit();
     }
 
@@ -403,11 +421,15 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
      */
     @Override
     public void register(final InstanceInfo info, final boolean isReplication) {
+        //默认的租约持续时间是90s
         int leaseDuration = Lease.DEFAULT_DURATION_IN_SECS;
+        // 如果当前Instance实例的租约信息中有leaseDuration持续时间，使用实例的leaseDuration
         if (info.getLeaseInfo() != null && info.getLeaseInfo().getDurationInSecs() > 0) {
             leaseDuration = info.getLeaseInfo().getDurationInSecs();
         }
+        // 【 当前Eureka Server注册实例信息 】
         super.register(info, leaseDuration, isReplication);
+        // 【 将注册实例信息复制到集群中其它节点 】
         replicateToPeers(Action.Register, info.getAppName(), info.getId(), info, null, isReplication);
     }
 
@@ -594,19 +616,6 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
      * @return true, if it can be registered in this server, false otherwise.
      */
     public boolean isRegisterable(InstanceInfo instanceInfo) {
-        DataCenterInfo datacenterInfo = instanceInfo.getDataCenterInfo();
-        String serverRegion = clientConfig.getRegion();
-        if (AmazonInfo.class.isInstance(datacenterInfo)) {
-            AmazonInfo info = AmazonInfo.class.cast(instanceInfo.getDataCenterInfo());
-            String availabilityZone = info.get(MetaDataKey.availabilityZone);
-            // Can be null for dev environments in non-AWS data center
-            if (availabilityZone == null && US_EAST_1.equalsIgnoreCase(serverRegion)) {
-                return true;
-            } else if ((availabilityZone != null) && (availabilityZone.contains(serverRegion))) {
-                // If in the same region as server, then consider it registerable
-                return true;
-            }
-        }
         return true; // Everything non-amazon is registrable.
     }
 

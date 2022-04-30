@@ -145,6 +145,7 @@ public class EurekaBootStrap implements ServletContextListener {
      * init hook for server context. Override for custom logic.
      */
     protected void initEurekaServerContext() throws Exception {
+        // 1. 加载 eureka-server.properties 文件中的配置
         EurekaServerConfig eurekaServerConfig = new DefaultEurekaServerConfig();
 
         // For backward compatibility
@@ -155,6 +156,7 @@ public class EurekaBootStrap implements ServletContextListener {
         logger.info(eurekaServerConfig.getJsonCodecName());
         ServerCodecs serverCodecs = new DefaultServerCodecs(eurekaServerConfig);
 
+        // 2. 初始化 eureka-server 内部的一个 eureka-client (用来跟其他的 eureka-server 节点注册和通信)
         ApplicationInfoManager applicationInfoManager = null;
 
         if (eurekaClient == null) {
@@ -171,6 +173,7 @@ public class EurekaBootStrap implements ServletContextListener {
             applicationInfoManager = eurekaClient.getApplicationInfoManager();
         }
 
+        // 3. 处理注册相关的事情
         PeerAwareInstanceRegistry registry;
         if (isAws(applicationInfoManager.getInfo())) {
             registry = new AwsInstanceRegistry(
@@ -190,6 +193,7 @@ public class EurekaBootStrap implements ServletContextListener {
             );
         }
 
+        // 4. 处理 peer 节点相关的事情
         PeerEurekaNodes peerEurekaNodes = getPeerEurekaNodes(
                 registry,
                 eurekaServerConfig,
@@ -198,6 +202,7 @@ public class EurekaBootStrap implements ServletContextListener {
                 applicationInfoManager
         );
 
+        // 5. 完成 eureka-server 上下文的的构建以及初始化
         serverContext = new DefaultEurekaServerContext(
                 eurekaServerConfig,
                 serverCodecs,
@@ -212,10 +217,12 @@ public class EurekaBootStrap implements ServletContextListener {
         logger.info("Initialized server context");
 
         // Copy registry from neighboring eureka node
+        // 6. 处理一点善后的事情，从相邻的 eurke 节点 copy 注册信息
         int registryCount = registry.syncUp();
         registry.openForTraffic(applicationInfoManager, registryCount);
 
         // Register all monitoring statistics.
+        // 7. 注册所有的监控统计项
         EurekaMonitors.registerAllStats();
     }
     

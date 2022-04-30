@@ -35,9 +35,12 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class RateLimiter {
 
+    // 速率单位转换成毫秒
     private final long rateToMsConversion;
 
+    // 消耗令牌数
     private final AtomicInteger consumedTokens = new AtomicInteger();
+    //最后填充令牌的时间
     private final AtomicLong lastRefillTime = new AtomicLong(0);
 
     @Deprecated
@@ -47,10 +50,10 @@ public class RateLimiter {
 
     public RateLimiter(TimeUnit averageRateUnit) {
         switch (averageRateUnit) {
-            case SECONDS:
+            case SECONDS:// 秒级
                 rateToMsConversion = 1000;
                 break;
-            case MINUTES:
+            case MINUTES:// 分钟级
                 rateToMsConversion = 60 * 1000;
                 break;
             default:
@@ -58,6 +61,13 @@ public class RateLimiter {
         }
     }
 
+    /**
+     * 获取令牌( Token )
+     *
+     * @param burstSize 令牌桶上限
+     * @param averageRate 令牌再装平均速率
+     * @return 是否获取成功
+     */
     public boolean acquire(int burstSize, long averageRate) {
         return acquire(burstSize, averageRate, System.currentTimeMillis());
     }
@@ -67,24 +77,32 @@ public class RateLimiter {
             return true;
         }
 
+        // 填充 令牌
         refillToken(burstSize, averageRate, currentTimeMillis);
         return consumeToken(burstSize);
     }
 
     private void refillToken(int burstSize, long averageRate, long currentTimeMillis) {
+        // 获得 最后填充令牌的时间
         long refillTime = lastRefillTime.get();
+        // 获得 过去多少毫秒
         long timeDelta = currentTimeMillis - refillTime;
 
+        // 计算 可填充最大令牌数量
         long newTokens = timeDelta * averageRate / rateToMsConversion;
         if (newTokens > 0) {
+            // 计算 新的填充令牌的时间
             long newRefillTime = refillTime == 0
                     ? currentTimeMillis
                     : refillTime + newTokens * rateToMsConversion / averageRate;
+            // CAS 保证有且仅有一个线程进入填充
             if (lastRefillTime.compareAndSet(refillTime, newRefillTime)) {
                 while (true) {
+                    // 计算 填充令牌后的已消耗令牌数量
                     int currentLevel = consumedTokens.get();
                     int adjustedLevel = Math.min(currentLevel, burstSize); // In case burstSize decreased
                     int newLevel = (int) Math.max(0, adjustedLevel - newTokens);
+                    // CAS 避免和正在消费令牌的线程冲突
                     if (consumedTokens.compareAndSet(currentLevel, newLevel)) {
                         return;
                     }

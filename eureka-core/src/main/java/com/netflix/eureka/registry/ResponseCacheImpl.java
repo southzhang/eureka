@@ -16,28 +16,9 @@
 
 package com.netflix.eureka.registry;
 
-import javax.annotation.Nullable;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Date;
-import java.util.List;
-import java.util.TimerTask;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.zip.GZIPOutputStream;
-
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
-import com.google.common.cache.RemovalListener;
-import com.google.common.cache.RemovalNotification;
+import com.google.common.cache.*;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
 import com.netflix.appinfo.EurekaAccept;
@@ -57,6 +38,17 @@ import com.netflix.servo.monitor.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.zip.GZIPOutputStream;
+
 /**
  * The class that is responsible for caching registry information that will be
  * queried by the clients.
@@ -66,7 +58,7 @@ import org.slf4j.LoggerFactory;
  * categories of requests - all applications, delta changes and for individual
  * applications. The compressed form is probably the most efficient in terms of
  * network traffic especially when querying all applications.
- *
+ * <p>
  * The cache also maintains separate pay load for <em>JSON</em> and <em>XML</em>
  * formats and for multiple versions too.
  * </p>
@@ -112,9 +104,12 @@ public class ResponseCacheImpl implements ResponseCache {
                 }
             });
 
+    // 只读缓存
     private final ConcurrentMap<Key, Value> readOnlyCacheMap = new ConcurrentHashMap<Key, Value>();
 
+    // 读写缓存, LoadingCache：Guava 提供的本地缓存，多线程的场景下保证只有一个线程加载相应缓存项
     private final LoadingCache<Key, Value> readWriteCacheMap;
+    // 判断是否使用只读缓存
     private final boolean shouldUseReadOnlyResponseCache;
     private final AbstractInstanceRegistry registry;
     private final EurekaServerConfig serverConfig;
@@ -123,12 +118,15 @@ public class ResponseCacheImpl implements ResponseCache {
     ResponseCacheImpl(EurekaServerConfig serverConfig, ServerCodecs serverCodecs, AbstractInstanceRegistry registry) {
         this.serverConfig = serverConfig;
         this.serverCodecs = serverCodecs;
+        // 是否使用只读缓存，默认为 true
         this.shouldUseReadOnlyResponseCache = serverConfig.shouldUseReadOnlyResponseCache();
         this.registry = registry;
 
+        // 只读缓存更新间隔时间，默认30秒
         long responseCacheUpdateIntervalMs = serverConfig.getResponseCacheUpdateIntervalMs();
         this.readWriteCacheMap =
                 CacheBuilder.newBuilder().initialCapacity(1000)
+                        // 缓存的数据在写入多久后过期，默认180秒，也就是说 readWriteCacheMap 会定时过期
                         .expireAfterWrite(serverConfig.getResponseCacheAutoExpirationInSeconds(), TimeUnit.SECONDS)
                         .removalListener(new RemovalListener<Key, Value>() {
                             @Override
@@ -153,6 +151,8 @@ public class ResponseCacheImpl implements ResponseCache {
                         });
 
         if (shouldUseReadOnlyResponseCache) {
+            // 如果配置了使用只读缓存，就开启一个定时任务，定期将 readWriteCacheMap 的数据同步到 readOnlyCacheMap 中
+            // 默认间隔时间是 30 秒
             timer.schedule(getCacheUpdateTask(),
                     new Date(((System.currentTimeMillis() / responseCacheUpdateIntervalMs) * responseCacheUpdateIntervalMs)
                             + responseCacheUpdateIntervalMs),
@@ -220,11 +220,10 @@ public class ResponseCacheImpl implements ResponseCache {
     /**
      * Get the compressed information about the applications.
      *
-     * @param key
-     *            the key for which the compressed cached information needs to
+     * @param key the key for which the compressed cached information needs to
      *            be obtained.
      * @return compressed payload which contains information about the
-     *         applications.
+     * applications.
      */
     public byte[] getGZIP(Key key) {
         Value payload = getValue(key, shouldUseReadOnlyResponseCache);
@@ -244,10 +243,13 @@ public class ResponseCacheImpl implements ResponseCache {
         for (Key.KeyType type : Key.KeyType.values()) {
             for (Version v : Version.values()) {
                 invalidate(
+                        // 失效服务的缓存
                         new Key(Key.EntityType.Application, appName, type, v, EurekaAccept.full),
                         new Key(Key.EntityType.Application, appName, type, v, EurekaAccept.compact),
+                        // 失效所有 APP 的缓存
                         new Key(Key.EntityType.Application, ALL_APPS, type, v, EurekaAccept.full),
                         new Key(Key.EntityType.Application, ALL_APPS, type, v, EurekaAccept.compact),
+                        // 失效增量 APP 的缓存
                         new Key(Key.EntityType.Application, ALL_APPS_DELTA, type, v, EurekaAccept.full),
                         new Key(Key.EntityType.Application, ALL_APPS_DELTA, type, v, EurekaAccept.compact)
                 );
@@ -271,6 +273,7 @@ public class ResponseCacheImpl implements ResponseCache {
             logger.debug("Invalidating the response cache key : {} {} {} {}, {}",
                     key.getEntityType(), key.getName(), key.getVersion(), key.getType(), key.getEurekaAccept());
 
+            // 失效读写缓存
             readWriteCacheMap.invalidate(key);
             Collection<Key> keysWithRegions = regionSpecificKeys.get(key);
             if (null != keysWithRegions && !keysWithRegions.isEmpty()) {
@@ -304,11 +307,10 @@ public class ResponseCacheImpl implements ResponseCache {
     }
 
     /**
-     * @deprecated use instance method {@link #getVersionDelta()}
-     *
-     * Gets the version number of the cached data.
-     *
      * @return teh version number of the cached data.
+     * @deprecated use instance method {@link #getVersionDelta()}
+     * <p>
+     * Gets the version number of the cached data.
      */
     @Deprecated
     public static AtomicLong getVersionDeltaStatic() {
@@ -316,11 +318,10 @@ public class ResponseCacheImpl implements ResponseCache {
     }
 
     /**
-     * @deprecated use instance method {@link #getVersionDeltaWithRegions()}
-     *
-     * Gets the version number of the cached data with remote regions.
-     *
      * @return teh version number of the cached data with remote regions.
+     * @deprecated use instance method {@link #getVersionDeltaWithRegions()}
+     * <p>
+     * Gets the version number of the cached data with remote regions.
      */
     @Deprecated
     public static AtomicLong getVersionDeltaWithRegionsLegacy() {
@@ -344,15 +345,18 @@ public class ResponseCacheImpl implements ResponseCache {
     Value getValue(final Key key, boolean useReadOnlyCache) {
         Value payload = null;
         try {
+            // 开启使用只读缓存，则先从只读缓存读取
             if (useReadOnlyCache) {
                 final Value currentPayload = readOnlyCacheMap.get(key);
                 if (currentPayload != null) {
                     payload = currentPayload;
                 } else {
+                    // 只读缓存中没有，则从读写缓存中读取，然后放入只读缓存中
                     payload = readWriteCacheMap.get(key);
                     readOnlyCacheMap.put(key, payload);
                 }
             } else {
+                // 未开启只读缓存，就从读写缓存中读取
                 payload = readWriteCacheMap.get(key);
             }
         } catch (Throwable t) {
@@ -373,7 +377,7 @@ public class ResponseCacheImpl implements ResponseCache {
             logger.error("Failed to encode the payload for all apps", e);
             return "";
         }
-        if(logger.isDebugEnabled()) {
+        if (logger.isDebugEnabled()) {
             logger.debug("New application cache entry {} with apps hashcode {}", key.toStringCompact(), apps.getAppsHashCode());
         }
         return result;
@@ -406,16 +410,18 @@ public class ResponseCacheImpl implements ResponseCache {
             switch (key.getEntityType()) {
                 case Application:
                     boolean isRemoteRegionRequested = key.hasRegions();
-
+                    // 获取所有应用
                     if (ALL_APPS.equals(key.getName())) {
                         if (isRemoteRegionRequested) {
                             tracer = serializeAllAppsWithRemoteRegionTimer.start();
                             payload = getPayLoad(key, registry.getApplicationsFromMultipleRegions(key.getRegions()));
                         } else {
                             tracer = serializeAllAppsTimer.start();
+                            // 从注册表读取所有服务实例
                             payload = getPayLoad(key, registry.getApplications());
                         }
                     } else if (ALL_APPS_DELTA.equals(key.getName())) {
+                        // 增量获取应用
                         if (isRemoteRegionRequested) {
                             tracer = serializeDeltaAppsWithRemoteRegionTimer.start();
                             versionDeltaWithRegions.incrementAndGet();
@@ -495,7 +501,6 @@ public class ResponseCacheImpl implements ResponseCache {
 
     /**
      * The class that stores payload in both compressed and uncompressed form.
-     *
      */
     public class Value {
         private final String payload;

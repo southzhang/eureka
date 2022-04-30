@@ -41,13 +41,19 @@ public class LeaseInfo {
     public static final int DEFAULT_LEASE_DURATION = 90;
 
     // Client settings
+    // 客户端维护的心跳间隔时间
     private int renewalIntervalInSecs = DEFAULT_LEASE_RENEWAL_INTERVAL;
+    // 客户端维护的租约持续时间
     private int durationInSecs = DEFAULT_LEASE_DURATION;
 
     // Server populated
+    // 服务端维护的实例注册时间
     private long registrationTimestamp;
+    // 服务端维护的实例最近一次更新时间
     private long lastRenewalTimestamp;
+    // 服务端维护的实例过期清理时间
     private long evictionTimestamp;
+    // 服务端维护的实例启动时间
     private long serviceUpTimestamp;
 
     public static final class Builder {

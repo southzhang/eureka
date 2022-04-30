@@ -13,6 +13,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  */
 public class StringCache {
 
+    // 缓存字符串最大长度
     public static final int LENGTH_LIMIT = 38;
 
     private static final StringCache INSTANCE = new StringCache();
@@ -29,6 +30,7 @@ public class StringCache {
         this.lengthLimit = lengthLimit;
     }
 
+    // 获得字符串缓存。若缓存不存在，则进行缓存
     public String cachedValueOf(final String str) {
         if (str != null && (lengthLimit < 0 || str.length() <= lengthLimit)) {
             // Return value from cache if available

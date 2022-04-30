@@ -22,6 +22,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+// 除了这里使用这个计数任务工具类
+// 还有 PeerAwareInstanceRegistryImpl.numberOfReplicationsLastMin 字段也使用该工具类
+// numberOfReplicationsLastMin：服务端统计最后一分钟同步复制给集群节点的操作数
 /**
  * Utility class for getting a count in last X milliseconds.
  *
@@ -29,7 +32,10 @@ import org.slf4j.LoggerFactory;
  */
 public class MeasuredRate {
     private static final Logger logger = LoggerFactory.getLogger(MeasuredRate.class);
+    // 最近一分钟（上一分钟）的计数
+    // getCount() 返回该计数
     private final AtomicLong lastBucket = new AtomicLong(0);
+    // 当前一分钟正在统计的计数
     private final AtomicLong currentBucket = new AtomicLong(0);
 
     private final long sampleInterval;
@@ -48,12 +54,17 @@ public class MeasuredRate {
 
     public synchronized void start() {
         if (!isActive) {
+            // 开启任务
+            // 固定时间重复执行，一分钟后开始，每分钟执行一次
             timer.schedule(new TimerTask() {
 
                 @Override
                 public void run() {
                     try {
                         // Zero out the current bucket.
+                        // 每当到了任务刚刚开始的时候
+                        // 记录上一分钟的计数
+                        // 清零当前一分钟正在统计的计数
                         lastBucket.set(currentBucket.getAndSet(0));
                     } catch (Throwable e) {
                         logger.error("Cannot reset the Measured Rate", e);

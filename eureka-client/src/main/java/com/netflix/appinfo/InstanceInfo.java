@@ -50,6 +50,8 @@ import org.slf4j.LoggerFactory;
  *
  * @author Karthik Ranganathan, Greg Kim
  */
+// 客户端中，表示自身实例信息
+// 服务端中，表示实例存在服务端注册表中的信息
 @ProvidedBy(EurekaConfigBasedInstanceInfoProvider.class)
 @Serializer("com.netflix.discovery.converters.EntityBodyConverter")
 @XStreamAlias("instance")
@@ -300,10 +302,14 @@ public class InstanceInfo {
 
 
     public enum InstanceStatus {
+        // 启动状态，表示实例对外正常提供服务
         UP, // Ready to receive traffic
+        // 下线状态，实例健康检查失败时修改为该状态
         DOWN, // Do not send traffic- healthcheck callback failed
+        // 启动中状态，表示实例正在初始化启动中
         STARTING, // Just about starting- initializations to be done - do not
         // send traffic
+        // 停止服务状态，表示实例不对外提供服务
         OUT_OF_SERVICE, // Intentionally shutdown for traffic
         UNKNOWN;
 
